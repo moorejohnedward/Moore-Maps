@@ -1,0 +1,99 @@
+# Release: whenever main gets a new __version__ in mooremaps/__init__.py,
+# GitHub builds MooreMaps.exe on Windows and posts it as a Release (tag vX.Y.Z).
+# The app's "Check for updates" button downloads from the newest Release.
+# Pushes that don't change the version are skipped.
+name: Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version and see if it's already released
+        id: ver
+        shell: pwsh
+        run: |
+          $src = Get-Content mooremaps/__init__.py -Raw
+          $ver = [regex]::Match($src, '__version__\s*=\s*"([^"]+)"').Groups[1].Value
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          gh release view "v$ver" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "v$ver is already released - nothing to do."
+            "skip=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "Releasing v$ver"
+            "skip=false" >> $env:GITHUB_OUTPUT
+          }
+          exit 0
+
+      - uses: actions/setup-python@v5
+        if: steps.ver.outputs.skip == 'false'
+        with:
+          python-version: '3.12'
+
+      - name: Build MooreMaps.exe
+        if: steps.ver.outputs.skip == 'false'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+          python tools/write_version_info.py
+          python -m PyInstaller --noconfirm --distpath out MooreMaps.spec
+
+      - name: Test the .exe (makes a map without opening a window)
+        if: steps.ver.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          python tests/make_sample.py sample.png
+          $p = Start-Process -FilePath out/MooreMaps.exe -ArgumentList '--cli','sample.png','smoke' -Wait -PassThru
+          if (-not (Test-Path 'smoke/sample - training packet.pdf')) { throw "The .exe didn't produce a training packet" }
+          Get-ChildItem smoke
+          # open the real window, draw a map, close (catches missing theme/icon files)
+          $p = Start-Process -FilePath out/MooreMaps.exe -ArgumentList '--selftest','sample.png','selftest.txt' -Wait -PassThru
+          $r = Get-Content selftest.txt -ErrorAction SilentlyContinue
+          Write-Host "Self-test: $r"
+          if (-not ($r -like 'ok*')) { throw "The app window self-test failed: $r" }
+
+      - name: Fingerprint (SHA-256) for the updater's safety check
+        if: steps.ver.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash out/MooreMaps.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  MooreMaps.exe" | Out-File -Encoding ascii out/MooreMaps.exe.sha256
+
+      - name: Release notes from CHANGELOG.md
+        if: steps.ver.outputs.skip == 'false'
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          $lines = Get-Content CHANGELOG.md
+          $start = ($lines | Select-String -Pattern "^##\s+\[?v?$([regex]::Escape($ver))\b" | Select-Object -First 1).LineNumber
+          if ($start) {
+            $rest = $lines[$start..($lines.Count - 1)]
+            $end = ($rest | Select-String -Pattern '^##\s' | Select-Object -First 1).LineNumber
+            $notes = if ($end -gt 1) { $rest[0..($end - 2)] } elseif ($end -eq 1) { @("Version $ver") } else { $rest }
+          } else { $notes = @("Version $ver") }
+          $notes -join "`n" | Out-File -Encoding utf8 notes.md
+
+      - name: Create GitHub Release
+        if: steps.ver.outputs.skip == 'false'
+        run: >
+          gh release create "v${{ steps.ver.outputs.version }}"
+          out/MooreMaps.exe out/MooreMaps.exe.sha256
+          --target "${{ github.sha }}"
+          --title "Moore Maps ${{ steps.ver.outputs.version }}"
+          --notes-file notes.md

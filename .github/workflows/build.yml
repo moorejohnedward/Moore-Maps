@@ -1,0 +1,35 @@
+# Build check: runs on every push so problems are caught on GitHub, not on John's PC.
+# Makes a sample training packet from source on Windows. Nothing is released here.
+name: Build check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: python -m pip install -r requirements.txt
+      - name: Make a sample map
+        run: |
+          python tests/make_sample.py sample.png
+          python MooreMaps.py --cli sample.png smoke --dpi 120
+      - name: Open the window and draw a map (self-test)
+        shell: pwsh
+        run: |
+          python MooreMaps.py --selftest sample.png selftest.txt
+          $r = Get-Content selftest.txt
+          Write-Host "Self-test: $r"
+          if (-not ($r -like 'ok*')) { throw "Self-test failed: $r" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sample-maps
+          path: smoke/

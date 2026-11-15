@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+Release (app to run and share)/
+version_info.txt
+*.egg-info/
+.venv/
+venv/
+out/
+Sample maps/
