@@ -15,8 +15,8 @@ jobs:
   check:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install
@@ -32,7 +32,7 @@ jobs:
           $r = Get-Content selftest.txt
           Write-Host "Self-test: $r"
           if (-not ($r -like 'ok*')) { throw "Self-test failed: $r" }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sample-maps
           path: smoke/
