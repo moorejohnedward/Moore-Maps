@@ -562,10 +562,17 @@ def analyze(z: np.ndarray, cell_m: float, ci_ft: float) -> TerrainFeatures:
                            cliffs, streams, ridgelines, acc, acc_inv)
 
 
-def vegetation_mask(shape, seed: int, cover: float = 0.45) -> np.ndarray:
-    """Green woods areas (just for looks and map-reading practice)."""
+def vegetation_field(shape, seed: int, cover: float = 0.45):
+    """Green woods areas (for looks and map-reading practice).
+    Returns (smooth field, threshold): woods are wherever field >= threshold. Keeping the smooth
+    field lets the map draw the woods as vector outlines that stay crisp at any print dpi."""
     h, w = shape
     nz = fractal_noise(h, w, seed + 101)
     nz = gaussian_blur(nz, 0.012 * min(h, w))
-    t = np.percentile(nz, 100 * (1 - cover))
+    t = float(np.percentile(nz, 100 * (1 - cover)))
+    return nz, t
+
+
+def vegetation_mask(shape, seed: int, cover: float = 0.45) -> np.ndarray:
+    nz, t = vegetation_field(shape, seed, cover)
     return nz >= t

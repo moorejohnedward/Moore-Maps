@@ -26,6 +26,8 @@ Every map comes with a ready-to-teach **training packet** (PDF):
 4. Fill in the **map title**, **sheet number**, **scale** (1:25,000 is a good classroom scale) and **paper size** (Letter to 36 x 24 in poster).
 5. Check the **Answer key** tab, then **Export training packet…** (PNG maps at print quality plus the PDF packet). Exports go to `Documents\Moore Maps` by default.
 
+**Print quality:** 150 to 1200 dpi. 300 dpi is print-shop quality; 600-1200 dpi is for fine-line printers and large posters. High-dpi PNGs are drawn in tiles so they fit in memory, and carry their dpi so they print at the right size. The PDF's maps are vector, so the PDF prints sharp at any printer resolution.
+
 **Show picture under map** fades the original picture in beneath the contours, so you can do the "reveal" at the end of a class.
 
 ## How the terrain features are found

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import math
+import os
 import random
 import textwrap
 from dataclasses import dataclass, asdict
@@ -20,15 +21,19 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt                       # noqa: E402
 from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 from matplotlib.collections import LineCollection     # noqa: E402
-from matplotlib.colors import LightSource, ListedColormap  # noqa: E402
+from matplotlib.colors import LightSource             # noqa: E402
 from matplotlib.path import Path                      # noqa: E402
 from matplotlib.patches import Rectangle, Polygon, Circle  # noqa: E402
+from matplotlib.transforms import Bbox                # noqa: E402
 import numpy as np                                    # noqa: E402
 from PIL import Image                                 # noqa: E402
 
 from . import __version__
 from .terrain import (TerrainOptions, TerrainFeatures, Feature, make_elevation, analyze,
-                      vegetation_mask, gaussian_blur, load_picture)
+                      vegetation_field, gaussian_blur, load_picture)
+
+DPI_CHOICES = [150, 200, 300, 400, 600, 800, 1200]
+PDF_RASTER_DPI = 300     # the PDF is vector (sharp at any printer dpi); only shading/photo layers use this
 
 M_TO_YD = 1.0936133
 MILS_PER_DEG = 6400.0 / 360.0
@@ -161,7 +166,7 @@ def build_model(picture_path_or_img, topt: TerrainOptions, mopt: MapOptions) -> 
     # Put the frame edges off the grid lines, like a real sheet.
     e0 = mopt.easting_km * 1000 - rng.randint(150, 850)
     n0 = mopt.northing_km * 1000 - rng.randint(150, 850)
-    woods = vegetation_mask(z.shape, topt.seed, mopt.woods_cover) if mopt.vegetation else None
+    woods = vegetation_field(z.shape, topt.seed, mopt.woods_cover) if mopt.vegetation else None
 
     model = MapModel(z=z, zs=gaussian_blur(z, 1.2), picture=small, feats=feats, topt=topt, mopt=mopt,
                      paper_w=W, paper_h=H, frame=frame, ground_w=ground_w, ground_h=ground_h,
@@ -312,20 +317,21 @@ def _draw_terrain(ax, m: MapModel, key: bool):
     ax.set_facecolor("white")
     lw = min(m.paper_w, m.paper_h) / 11.0
 
+    X = (np.arange(cols) + 0.5) * m.cell_m
+    Y = m.ground_h - (np.arange(rows) + 0.5) * m.cell_m
+
     if m.mopt.photo_underlay > 0:
         ax.imshow(np.asarray(m.picture), extent=ext, origin="upper", alpha=m.mopt.photo_underlay,
                   interpolation="bilinear", zorder=0)
     if m.woods is not None:
-        ax.imshow(np.where(m.woods, 1.0, np.nan), extent=ext, origin="upper",
-                  cmap=ListedColormap([GREEN]), alpha=0.95 if m.mopt.photo_underlay == 0 else 0.6,
-                  interpolation="bilinear", zorder=1)
+        # drawn as vector shapes so the edges stay smooth at any print resolution
+        field, thresh = m.woods
+        ax.contourf(X, Y, field, levels=[thresh, float(field.max()) + 1.0], colors=[GREEN],
+                    alpha=0.95 if m.mopt.photo_underlay == 0 else 0.6, antialiased=True, zorder=1)
     if m.mopt.hillshade:
         ls = LightSource(azdeg=315, altdeg=45)
         shade = ls.hillshade(m.zs, vert_exag=0.05 / max(m.cell_m, 1e-6) * 30, dx=1, dy=1)
         ax.imshow(shade, extent=ext, origin="upper", cmap="gray", alpha=0.22, vmin=0, vmax=1, zorder=2)
-
-    X = (np.arange(cols) + 0.5) * m.cell_m
-    Y = m.ground_h - (np.arange(rows) + 0.5) * m.cell_m
     ci = m.ci_ft
     lo = math.ceil(m.zs.min() / ci) * ci
     hi = math.floor(m.zs.max() / ci) * ci
@@ -478,13 +484,19 @@ def _draw_grid_numbers(fig, ax, m: MapModel):
                      fontsize=fs * 0.55)
 
 
+def short_title(m: MapModel) -> str:
+    """Map title in capitals, kept short (28 characters at most) so it reads like a real sheet name."""
+    t = " ".join((m.mopt.title or "TRAINING AREA").upper().split())
+    return t if len(t) <= 28 else t[:28].rsplit(" ", 1)[0]
+
+
 def _draw_title(fig, m: MapModel, key: bool):
     W, H = m.paper_w, m.paper_h
     k = min(W, H) / 11.0
     L, B, FW, FH = m.frame
     top = min(1 - 0.3 * k / H, (B + FH + 0.85 * k) / H)
-    fig.text(0.5, top, m.mopt.title.upper(), ha="center", va="top", fontsize=_fs(m, 17), fontweight="bold")
-    fig.text(0.5, top - 0.32 * k / H, "MOORE MAPS TRAINING SERIES  •  FICTITIOUS TERRAIN  •  NOT FOR REAL-WORLD NAVIGATION",
+    fig.text(0.5, top, short_title(m), ha="center", va="top", fontsize=_fs(m, 17), fontweight="bold")
+    fig.text(0.5, top - 0.32 * k / H, "TRAINING MAP  •  NOT FOR NAVIGATION",
              ha="center", va="top", fontsize=_fs(m, 7))
     fig.text(0.35 * k / W, top, f"1:{m.mopt.scale:,}", ha="left", va="top", fontsize=_fs(m, 11), fontweight="bold")
     fig.text(1 - 0.35 * k / W, top, f"SHEET {m.mopt.sheet}", ha="right", va="top", fontsize=_fs(m, 11),
@@ -676,7 +688,7 @@ def _table(fig, top: float, headers, rows, widths, fs=8.5, row_h=0.024):
 
 
 def draw_exercise_page(m: MapModel):
-    fig = _text_page(f"LAND NAVIGATION EXERCISE — {m.mopt.title.upper()}",
+    fig = _text_page("LAND NAV EXERCISE",
                      f"Sheet {m.mopt.sheet}  •  Scale 1:{m.mopt.scale:,}  •  Contour interval {m.ci_ft:g} ft  •  "
                      f"G-M angle {abs(m.mopt.gm_angle_deg):.1f}° {'E' if m.mopt.gm_angle_deg >= 0 else 'W'}")
     y = 0.90
@@ -730,7 +742,7 @@ def draw_exercise_page(m: MapModel):
 
 
 def draw_reference_page(m: MapModel):
-    fig = _text_page("TERRAIN FEATURE REFERENCE CARD", "Five major, three minor (and two supplementary) terrain features")
+    fig = _text_page("TERRAIN FEATURES", "5 major, 3 minor, 2 supplementary")
     y = 0.905
     for name, kind, text in DEFINITIONS:
         fig.text(0.07, y, f"{name.upper()}", fontsize=12, fontweight="bold", va="top",
@@ -757,7 +769,7 @@ def draw_reference_page(m: MapModel):
 
 
 def draw_answer_page(m: MapModel):
-    fig = _text_page(f"ANSWER SHEET — {m.mopt.title.upper()}", f"Sheet {m.mopt.sheet}  •  Instructor copy")
+    fig = _text_page("ANSWER SHEET", f"Sheet {m.mopt.sheet}  •  Instructor copy")
     y = 0.90
     if m.letters:
         fig.text(0.07, y, "PART 1 — TERRAIN FEATURES", fontsize=11, fontweight="bold", va="top")
@@ -828,31 +840,130 @@ def preview_image(m: MapModel, key: bool = False, max_px: int = 1400) -> Image.I
     return Image.open(buf).convert("RGB")
 
 
-def export_all(m: MapModel, out_dir: str, base: str) -> list:
-    """Writes PNGs of both maps plus one PDF training packet. Returns the file paths."""
-    import os
+def available_ram_bytes() -> int | None:
+    """Free memory right now (Windows or Linux), or None if it can't be read."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            st = MEMORYSTATUSEX()
+            st.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return int(st.ullAvailPhys)
+            return None
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:
+        return None
+    return None
+
+
+def png_dpi_that_fits(paper_w: float, paper_h: float, dpi: int) -> int:
+    """Highest dpi (up to the one asked for) whose finished picture fits comfortably in free memory."""
+    avail = available_ram_bytes()
+    if not avail:
+        return dpi
+    budget = 0.45 * avail                       # leave room for Windows and other programs
+    for d in [c for c in sorted(DPI_CHOICES, reverse=True) if c <= dpi] + [150]:
+        if paper_w * d * paper_h * d * 3 * 1.15 <= budget:
+            return d
+    return 150
+
+
+def save_png(fig, path: str, dpi: int, tile_px: int = 4096, progress=None, force_tiles: bool = False):
+    """Saves a page as PNG at any dpi, with the dpi written into the file so printers and photo
+    programs print it at the right size.
+
+    If there's enough free memory the page is drawn in one piece (best quality). Otherwise it's
+    drawn in tiles of at most 4,096 x 4,096 pixels and joined, so even 1,200 dpi posters fit.
+    Each tile is drawn with a margin on every side and trimmed, so lines crossing a tile edge
+    join cleanly (dashed lines may restart their dash pattern at a tile edge)."""
+    W_in, H_in = fig.get_size_inches()
+    Wp, Hp = int(round(W_in * dpi)), int(round(H_in * dpi))
+    avail = available_ram_bytes()
+    one_piece_bytes = Wp * Hp * 4 * 2.6            # drawing surface plus the copy made when saving
+    fits = Wp * Hp <= 40_000_000 or (avail is not None and one_piece_bytes <= 0.5 * avail) \
+        or (avail is None and Wp * Hp <= 300_000_000)
+    if fits and not force_tiles and max(Wp, Hp) < 65000:
+        if progress:
+            progress(0.0)
+        fig.savefig(path, dpi=dpi, format="png", pil_kwargs={"dpi": (dpi, dpi)})
+        if progress:
+            progress(1.0)
+        return
+    out = Image.new("RGB", (Wp, Hp), "white")
+    pad = int(dpi * 6 / 72) + 4                    # margin wider than the thickest line (6 points)
+    xs = list(range(0, Wp, tile_px))
+    ys = list(range(0, Hp, tile_px))
+    total, done = len(xs) * len(ys), 0
+    for top in ys:                                 # pixel rows from the top of the page
+        for left in xs:
+            w = min(tile_px, Wp - left)
+            h = min(tile_px, Hp - top)
+            pl = min(pad, left)                    # margins, clamped at the page edges
+            pt = min(pad, top)
+            pr = min(pad, Wp - (left + w))
+            pb = min(pad, Hp - (top + h))
+            x0 = (left - pl) / dpi
+            x1 = (left + w + pr) / dpi
+            y1 = (Hp - (top - pt)) / dpi           # matplotlib measures up from the bottom
+            y0 = (Hp - (top + h + pb)) / dpi
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=dpi, bbox_inches=Bbox.from_extents(x0, y0, x1, y1), pad_inches=0)
+            buf.seek(0)
+            tile = Image.open(buf).convert("RGB")
+            tile = tile.crop((pl, pt, min(pl + w, tile.width), min(pt + h, tile.height)))
+            out.paste(tile, (left, top))
+            done += 1
+            if progress:
+                progress(done / total)
+    out.save(path, dpi=(dpi, dpi), compress_level=6)
+
+
+def export_all(m: MapModel, out_dir: str, base: str, progress=None, notes: list | None = None) -> list:
+    """Writes PNGs of both maps plus one PDF training packet. Returns the file paths.
+    progress(text) is called with status lines; notes collects anything worth telling the user."""
     os.makedirs(out_dir, exist_ok=True)
+    notes = notes if notes is not None else []
+    say = progress or (lambda t: None)
     paths = []
-    student = draw_map_page(m, key=False)
-    p = os.path.join(out_dir, f"{base} - student map.png")
-    student.savefig(p, dpi=m.mopt.dpi)
-    paths.append(p)
-    keyfig = draw_map_page(m, key=True)
-    p = os.path.join(out_dir, f"{base} - answer key map.png")
-    keyfig.savefig(p, dpi=m.mopt.dpi)
-    paths.append(p)
+    dpi = m.mopt.dpi
+    png_dpi = png_dpi_that_fits(m.paper_w, m.paper_h, dpi)
+    if png_dpi < dpi:
+        notes.append(f"Your PC didn't have enough free memory for {dpi} dpi PNGs on "
+                     f"{m.paper_w:g} x {m.paper_h:g} in paper, so the PNGs were saved at {png_dpi} dpi. "
+                     f"The PDF is unaffected: it's vector, so it prints sharp at {dpi} dpi or any printer setting.")
+    student = draw_map_page(m, key=False, dpi=100)
+    keyfig = draw_map_page(m, key=True, dpi=100)
+    for fig, label in ((student, "student map"), (keyfig, "answer key map")):
+        p = os.path.join(out_dir, f"{base} - {label}.png")
+        say(f"Saving the {label} at {png_dpi} dpi "
+            f"({int(m.paper_w * png_dpi):,} x {int(m.paper_h * png_dpi):,} pixels)…")
+        save_png(fig, p, png_dpi,
+                 progress=lambda f, label=label: say(f"Saving the {label} at {png_dpi} dpi… {f:.0%}"))
+        paths.append(p)
+    say("Saving the PDF training packet…")
     pdf_path = os.path.join(out_dir, f"{base} - training packet.pdf")
     ex = draw_exercise_page(m)
     ref = draw_reference_page(m)
     an = draw_answer_page(m)
+    rdpi = min(dpi, PDF_RASTER_DPI)
     with PdfPages(pdf_path) as pdf:
-        pdf.savefig(student)
-        pdf.savefig(ex)
-        pdf.savefig(ref)
-        pdf.savefig(keyfig)
-        pdf.savefig(an)
+        pdf.savefig(student, dpi=rdpi)
+        pdf.savefig(ex, dpi=rdpi)
+        pdf.savefig(ref, dpi=rdpi)
+        pdf.savefig(keyfig, dpi=rdpi)
+        pdf.savefig(an, dpi=rdpi)
         d = pdf.infodict()
-        d["Title"] = f"{m.mopt.title} - Moore Maps training packet"
+        d["Title"] = f"{short_title(m).title()} - training packet"
         d["Author"] = "Moore Maps"
     for f in (student, keyfig, ex, ref, an):
         plt.close(f)

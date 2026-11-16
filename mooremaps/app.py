@@ -19,7 +19,7 @@ from PIL import Image, ImageTk
 
 from . import __version__, APP_NAME
 from . import updater
-from .render import MapOptions, PAPERS, build_model, preview_image, export_all
+from .render import MapOptions, PAPERS, DPI_CHOICES, build_model, preview_image, export_all
 from .terrain import TerrainOptions, load_picture
 
 SCALES = {"1:10,000": 10000, "1:24,000": 24000, "1:25,000": 25000, "1:50,000": 50000}
@@ -379,8 +379,10 @@ class App(tk.Tk):
         self._spin(p, "num_checkpoints", "Checkpoints", 2, 10)
 
         self._section(p, "Export")
-        self._combo(p, "dpi", "Print quality (dpi)", [150, 200, 300, 400])
-        ttk.Label(p, text="300 dpi is print-shop quality. Larger paper sizes take longer.",
+        self._combo(p, "dpi", "Print quality (dpi)", DPI_CHOICES)
+        ttk.Label(p, text="300 dpi is print-shop quality; 600-1200 dpi for fine-line printers and big "
+                          "posters (PNG files get very large and can take a few minutes). The PDF is "
+                          "vector, so it prints sharp at any dpi.",
                   style="Small.TLabel", foreground="#9a9a9a", wraplength=330).pack(anchor="w")
 
     # ------------------------------------------------------------------ options
@@ -424,10 +426,11 @@ class App(tk.Tk):
             return
         self.picture_path = path
         self.last_dir = os.path.dirname(path)
-        base = os.path.splitext(os.path.basename(path))[0]
         self.pic_label.configure(text=f"{os.path.basename(path)}  ({self.picture.width} x {self.picture.height})")
-        if self.v["title"].get() in ("", "TRAINING AREA"):
-            self.v["title"].set(re.sub(r"[_\-]+", " ", base).upper()[:40] + " TRAINING AREA")
+        # The picture's file name never goes on the map: titles stay short and generic.
+        title = self.v["title"].get().strip()
+        if not title or title.endswith(" TRAINING AREA"):     # also clears long titles older versions made
+            self.v["title"].set("TRAINING AREA")
         self.previews = {"Original picture": self.picture.copy()}
         self._schedule(0)
 
@@ -501,7 +504,8 @@ class App(tk.Tk):
             return
         self.export_dir = folder
         topt, mopt = self._read_options()
-        base = re.sub(r'[<>:"/\\|?*]+', "", mopt.title).strip() or "Moore Map"
+        # short, generic file names: "Training Area MM 001 - student map.png"
+        base = re.sub(r'[<>:"/\\|?*]+', "", f"{mopt.title.title()} {mopt.sheet}").strip() or "Moore Map"
         pic = self.picture
         self.status.set(f"Exporting at {mopt.dpi} dpi… (this can take a minute for big paper)")
         self.progress.start(12)
@@ -509,15 +513,22 @@ class App(tk.Tk):
         def work():
             try:
                 model = build_model(pic, topt, mopt)
-                paths = export_all(model, folder, base)
-                self._ui(lambda: self._export_done(folder, paths, None))
+                notes = []
+                paths = export_all(model, folder, base, notes=notes,
+                                   progress=lambda t: self._ui(lambda t=t: self.status.set(t)))
+                self._ui(lambda: self._export_done(folder, paths, None, notes))
+            except MemoryError:
+                self._ui(lambda: self._export_done(folder, None, (
+                    f"Your PC ran out of memory making {mopt.dpi} dpi pictures on this paper size.\n\n"
+                    "Try a lower dpi or smaller paper. The PDF in an earlier export is vector, so it "
+                    "prints sharp at any printer dpi."), []))
             except Exception:
                 err = traceback.format_exc()
-                self._ui(lambda: self._export_done(folder, None, err))
+                self._ui(lambda: self._export_done(folder, None, err, []))
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _export_done(self, folder, paths, err):
+    def _export_done(self, folder, paths, err, notes=()):
         self.progress.stop()
         if err:
             self.status.set("Export failed.")
@@ -526,9 +537,10 @@ class App(tk.Tk):
         self._save_settings()
         self.status.set(f"Saved {len(paths)} files to {folder}")
         names = "\n".join("• " + os.path.basename(p) for p in paths)
+        extra = ("\n\n" + "\n\n".join(notes)) if notes else ""
         messagebox.showinfo("Training packet saved",
                             f"Saved to {folder}:\n\n{names}\n\nThe PDF has the student map, exercise sheet, "
-                            f"reference card, answer-key map and answer sheet.")
+                            f"reference card, answer-key map and answer sheet.{extra}")
         open_folder(folder)
 
     # ------------------------------------------------------------------ updates
